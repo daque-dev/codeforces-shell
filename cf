@@ -1,0 +1,133 @@
+#!/bin/sh
+
+cookiefile="$HOME/.config/cf/cookies";
+userfile="$HOME/.config/cf/user";
+alias ccurl="curl -c $cookiefile -b $cookiefile -s -w \"%{http_code}\"";
+mkdir -p "$HOME/.config/cf"
+
+function say
+{
+    espeak -v spanish-latin-am -p 60 "$1" 2&>1 /dev/null;
+}
+
+function getcsrf
+{
+    url=$1
+    result=$(ccurl -o /dev/null $url);
+    if [[ $result != "200" ]];
+    then
+	return 255;
+    fi
+    csrf_token=$(ccurl $url | grep "name='csrf_token' value='.*'" -o | head -n 1 | grep "value='.*'" -o | grep "'.*'" -o)
+    echo ${csrf_token:1:-1};
+}
+
+function remove
+{
+    [[ -e $1 ]] && rm $1;
+}
+
+function login
+{
+    remove $cookiefile;
+    read -p "password: " -s password; echo;
+    url="https://codeforces.com/enter";
+    csrf_token=$(getcsrf $url);
+    result=$(ccurl -F action=enter \
+		   -F handleOrEmail=$username \
+		   -F "password=$password" \
+		   -F csrf_token=$csrf_token \
+		   -o /dev/null $url);
+    if [[ $result == "302" ]];
+    then
+	say "Sesión iniciada con éxito";
+	return 0;
+    else
+	say "Error al iniciar sesión";
+	remove $cookiefile;
+	remove $userfile;
+	return 255;
+    fi
+}
+
+if [[ -e $userfile ]];
+then
+    read username < $userfile;
+else
+    read -p "handle or email: " username;
+    echo $username > $userfile;
+    if login;
+    then
+	echo;
+    else
+	exit 255;
+    fi
+fi
+
+function submit
+{
+    [[ -z $username ]] && {
+	say "No has iniciado sesión";
+	return 255;
+    };
+    contest=$1;
+    problem=$2;
+    source=$3;
+    url="https://codeforces.com/problemset/problem/$contest/$problem";
+    csrf_token=$(getcsrf $url);
+    if [[ $? != "0" ]];
+    then
+	say "Error al buscar problema";
+	exit 255;
+    fi
+    result=$(ccurl -F csrf_token=$csrf_token \
+		   -F action=submitSolutionFormSubmitted \
+		   -F submittedProblemIndex=$problem \
+		   -F source= \
+		   -F programTypeId=54 \
+		   -F sourceFile=@$source \
+		   -o /dev/null "$url?csrf_token=$csrf_token");
+    if [[ $result != "302" ]];
+    then
+	say "Error al mandar solución";
+	exit 255;
+    fi
+    statusfile=$(mktemp);
+    substatus="";
+    while [[ $substatus != "OK" ]];
+    do
+	wget "https://codeforces.com/api/user.status?handle=$username&from=1&count=1" -O $statusfile -q;
+	substatus=$(jshon -e status < $statusfile);
+	substatus=${substatus:1:-1};
+    done
+    verdict=$(jshon -e result -e 0 -e verdict < $statusfile);
+    verdict=${verdict:1:-1}
+    while [[ $verdict == "TESTING" ]];
+    do
+	wget "https://codeforces.com/api/user.status?handle=$username&from=1&count=1" -O $statusfile -q;
+	verdict=$(jshon -e result -e 0 -e verdict < $statusfile);
+	verdict=${verdict:1:-1}
+	passedcount=$(jshon -e result -e 0 -e passedTestCount < $statusfile);
+	echo "Testing... Passed $passedcount tests.";
+    done
+    case $verdict
+    in
+	OK)
+	    say "Felicidades, fue aceptado.";;
+	*)
+	    say "Tengo malas noticias, $username.";;
+    esac
+}
+
+operation=$1
+case $operation
+in
+    submit)
+	contest=$2;
+	problem=$3;
+	source=$4;
+	submit $contest $problem $source;;
+    clear)
+	remove $cookiefile;
+	remove $userfile;
+esac
